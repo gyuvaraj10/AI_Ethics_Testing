@@ -35,3 +35,4 @@
 2. Fairlearn (Microsoft)
 3. Ethical OS Toolkit
 4. OpenAI's model cards and system cards
+5. https://langtest.org/docs/pages/docs/one_liner
