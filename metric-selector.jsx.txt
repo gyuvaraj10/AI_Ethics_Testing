@@ -1,0 +1,629 @@
+import { useState } from "react";
+
+const METRIC_LIBRARY = {
+  quality: [
+    { id: "task_success", name: "End-to-end Task Success Rate", description: "Did the crew complete the task as intended?" },
+    { id: "faithfulness", name: "Faithfulness / Hallucination Rate", description: "Is the output grounded in source material?" },
+    { id: "relevance", name: "Output Relevance", description: "Is the response pertinent to the user intent?" },
+    { id: "coherence", name: "Coherence & Fluency", description: "Is the output logically structured and readable?" },
+    { id: "completeness", name: "Completeness", description: "Does the output cover all required aspects?" },
+    { id: "format_compliance", name: "Format / Schema Compliance", description: "Does output match required structure or schema?" },
+  ],
+  safety: [
+    { id: "hallucination", name: "Hallucination Detection Rate", description: "Frequency of fabricated facts or citations." },
+    { id: "pii_leakage", name: "PII Leakage Rate", description: "Does the system expose sensitive personal data?" },
+    { id: "toxicity", name: "Toxicity / Harm Rate", description: "Does output contain harmful, biased or toxic content?" },
+    { id: "prompt_injection", name: "Prompt Injection Resistance", description: "Resilience against adversarial inputs." },
+    { id: "data_boundary", name: "Data Boundary Compliance", description: "Does the crew stay within authorized data scopes?" },
+  ],
+  operational: [
+    { id: "latency_p50", name: "Latency P50", description: "Median response time across tasks." },
+    { id: "latency_p95", name: "Latency P95", description: "Tail latency — worst 5% of requests." },
+    { id: "cost_per_task", name: "Cost Per Task Completion", description: "Token + compute cost per completed run." },
+    { id: "token_usage", name: "Token Usage Efficiency", description: "Are tokens being used without waste?" },
+    { id: "retry_rate", name: "Retry / Failure Rate", description: "How often does the crew need to retry steps?" },
+  ],
+  agent: [
+    { id: "tool_call_accuracy", name: "Tool Call Accuracy", description: "Are the right tools called with correct params?" },
+    { id: "handoff_success", name: "Agent Handoff Success Rate", description: "Are tasks passed between agents correctly?" },
+    { id: "loop_detection", name: "Loop / Infinite Recursion Rate", description: "Does the crew get stuck in cycles?" },
+    { id: "task_decomposition", name: "Task Decomposition Accuracy", description: "Does the orchestrator break down tasks well?" },
+    { id: "context_retention", name: "Context Retention Across Agents", description: "Is relevant context preserved through handoffs?" },
+    { id: "error_catch_rate", name: "Validator Error Catch Rate", description: "How well does the critic/validator catch errors?" },
+  ],
+  rag: [
+    { id: "retrieval_recall", name: "Retrieval Recall", description: "Are all relevant chunks being retrieved?" },
+    { id: "retrieval_precision", name: "Retrieval Precision", description: "Are retrieved chunks actually relevant?" },
+    { id: "context_relevance", name: "Context Relevance Score", description: "Is the retrieved context useful for the task?" },
+    { id: "chunk_quality", name: "Chunk Quality / Grounding", description: "Quality and accuracy of retrieved chunks." },
+  ],
+  business: [
+    { id: "escalation_rate", name: "Human Escalation Rate", description: "How often does the crew hand off to a human?" },
+    { id: "confidence_score", name: "Confidence / Uncertainty Score", description: "Does the crew know when it doesn't know?" },
+    { id: "user_satisfaction", name: "User Satisfaction (CSAT)", description: "Downstream satisfaction with outputs." },
+    { id: "sla_compliance", name: "SLA Compliance Rate", description: "Tasks completed within agreed time windows." },
+    { id: "action_accuracy", name: "Write/Action Accuracy", description: "For crews that take real-world actions (writes, API calls)." },
+  ],
+};
+
+const DECISION_QUESTIONS = [
+  {
+    id: "retrieval",
+    question: "Does this use case involve retrieval or external knowledge (RAG)?",
+    yes: ["retrieval_recall", "retrieval_precision", "context_relevance", "faithfulness"],
+    no: [],
+  },
+  {
+    id: "customer_facing",
+    question: "Is the output directly customer-facing?",
+    yes: ["toxicity", "coherence", "user_satisfaction", "pii_leakage"],
+    no: [],
+  },
+  {
+    id: "real_actions",
+    question: "Does the crew take real-world actions (write, update, call APIs)?",
+    yes: ["action_accuracy", "data_boundary", "prompt_injection"],
+    no: [],
+  },
+  {
+    id: "human_loop",
+    question: "Is there a human-in-the-loop or escalation path?",
+    yes: ["escalation_rate", "confidence_score"],
+    no: [],
+  },
+  {
+    id: "downstream_system",
+    question: "Is the output consumed by another system / downstream process?",
+    yes: ["format_compliance", "schema_compliance"],
+    no: [],
+  },
+  {
+    id: "multi_agent",
+    question: "Does this involve multiple agents handing off tasks to each other?",
+    yes: ["handoff_success", "context_retention", "task_decomposition", "loop_detection"],
+    no: [],
+  },
+  {
+    id: "latency_sensitive",
+    question: "Is this latency-sensitive (real-time or near-real-time)?",
+    yes: ["latency_p50", "latency_p95"],
+    no: ["latency_p50"],
+  },
+  {
+    id: "cost_sensitive",
+    question: "Is cost optimization a key concern?",
+    yes: ["cost_per_task", "token_usage"],
+    no: [],
+  },
+];
+
+const CATEGORY_META = {
+  quality: { label: "Quality", color: "#6EE7B7", bg: "#064E3B", icon: "◈" },
+  safety: { label: "Safety & Risk", color: "#FCA5A5", bg: "#7F1D1D", icon: "⬡" },
+  operational: { label: "Operational", color: "#93C5FD", bg: "#1E3A5F", icon: "◎" },
+  agent: { label: "Agent-Specific", color: "#C4B5FD", bg: "#3B1F6E", icon: "⬢" },
+  rag: { label: "Retrieval (RAG)", color: "#FDE68A", bg: "#78350F", icon: "◇" },
+  business: { label: "Business", color: "#F9A8D4", bg: "#6B1A3A", icon: "▣" },
+};
+
+const IMPACT_OPTIONS = ["High", "Medium", "Low"];
+const EFFORT_OPTIONS = ["Easy", "Medium", "Hard"];
+
+export default function MetricSelector() {
+  const [useCaseName, setUseCaseName] = useState("");
+  const [answers, setAnswers] = useState({});
+  const [manualSelections, setManualSelections] = useState({});
+  const [impactScores, setImpactScores] = useState({});
+  const [effortScores, setEffortScores] = useState({});
+  const [activeTab, setActiveTab] = useState("decision");
+  const [savedUseCases, setSavedUseCases] = useState([]);
+  const [viewingSaved, setViewingSaved] = useState(null);
+
+  const allMetrics = Object.values(METRIC_LIBRARY).flat();
+
+  const recommendedIds = new Set(
+    DECISION_QUESTIONS.flatMap((q) => {
+      if (answers[q.id] === true) return q.yes;
+      if (answers[q.id] === false) return q.no;
+      return [];
+    })
+  );
+
+  // Always-on baseline
+  ["task_success", "latency_p50", "escalation_rate"].forEach((id) => recommendedIds.add(id));
+
+  const allSelectedIds = new Set([
+    ...recommendedIds,
+    ...Object.keys(manualSelections).filter((id) => manualSelections[id]),
+  ]);
+
+  const getMetric = (id) => allMetrics.find((m) => m.id === id);
+
+  const toggle = (id) => {
+    setManualSelections((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const isSelected = (id) => allSelectedIds.has(id);
+
+  const finalMetrics = [...allSelectedIds]
+    .map(getMetric)
+    .filter(Boolean)
+    .map((m) => ({
+      ...m,
+      category: Object.entries(METRIC_LIBRARY).find(([, list]) =>
+        list.some((x) => x.id === m.id)
+      )?.[0],
+      impact: impactScores[m.id] || "High",
+      effort: effortScores[m.id] || "Easy",
+      tier:
+        (impactScores[m.id] === "High" || !impactScores[m.id]) &&
+        (effortScores[m.id] === "Easy" || !effortScores[m.id])
+          ? "core"
+          : impactScores[m.id] === "Low" && effortScores[m.id] === "Hard"
+          ? "exploratory"
+          : "diagnostic",
+    }));
+
+  const coreMets = finalMetrics.filter((m) => m.tier === "core");
+  const diagMets = finalMetrics.filter((m) => m.tier === "diagnostic");
+  const exploMets = finalMetrics.filter((m) => m.tier === "exploratory");
+
+  const saveUseCase = () => {
+    if (!useCaseName.trim()) return;
+    const entry = {
+      name: useCaseName,
+      answers,
+      metrics: finalMetrics,
+      timestamp: new Date().toLocaleString(),
+    };
+    setSavedUseCases((prev) => [...prev.filter((u) => u.name !== useCaseName), entry]);
+    alert(`"${useCaseName}" saved!`);
+  };
+
+  const answeredCount = Object.keys(answers).length;
+  const progress = Math.round((answeredCount / DECISION_QUESTIONS.length) * 100);
+
+  return (
+    <div style={{
+      minHeight: "100vh",
+      background: "#0A0A0F",
+      color: "#E2E8F0",
+      fontFamily: "'DM Mono', 'Fira Code', monospace",
+      padding: "0",
+    }}>
+      {/* Header */}
+      <div style={{
+        borderBottom: "1px solid #1E293B",
+        padding: "24px 32px",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        background: "linear-gradient(90deg, #0A0A0F 60%, #0F172A)",
+      }}>
+        <div>
+          <div style={{ fontSize: "11px", letterSpacing: "0.2em", color: "#475569", marginBottom: "4px" }}>
+            EVAL FRAMEWORK
+          </div>
+          <h1 style={{ margin: 0, fontSize: "22px", fontWeight: 700, color: "#F1F5F9", letterSpacing: "-0.5px" }}>
+            Metric Selector
+          </h1>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          <div style={{
+            width: "120px", height: "4px", background: "#1E293B", borderRadius: "2px", overflow: "hidden"
+          }}>
+            <div style={{
+              height: "100%", width: `${progress}%`,
+              background: "linear-gradient(90deg, #6EE7B7, #38BDF8)",
+              transition: "width 0.3s",
+            }} />
+          </div>
+          <span style={{ fontSize: "11px", color: "#475569" }}>{progress}%</span>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: "960px", margin: "0 auto", padding: "32px 24px" }}>
+        {/* Use Case Name */}
+        <div style={{ marginBottom: "32px" }}>
+          <label style={{ fontSize: "11px", letterSpacing: "0.15em", color: "#475569", display: "block", marginBottom: "8px" }}>
+            USE CASE NAME
+          </label>
+          <input
+            value={useCaseName}
+            onChange={(e) => setUseCaseName(e.target.value)}
+            placeholder="e.g. Customer Support Triage Crew"
+            style={{
+              width: "100%", padding: "12px 16px",
+              background: "#0F172A", border: "1px solid #1E293B",
+              borderRadius: "8px", color: "#E2E8F0",
+              fontSize: "14px", fontFamily: "inherit",
+              outline: "none", boxSizing: "border-box",
+            }}
+          />
+        </div>
+
+        {/* Tabs */}
+        <div style={{ display: "flex", gap: "4px", marginBottom: "28px", borderBottom: "1px solid #1E293B" }}>
+          {[
+            { id: "decision", label: "① Decision Tree" },
+            { id: "manual", label: "② Manual Tuning" },
+            { id: "results", label: `③ Results  (${finalMetrics.length})` },
+            ...(savedUseCases.length ? [{ id: "saved", label: `Saved (${savedUseCases.length})` }] : []),
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              style={{
+                padding: "10px 18px", fontSize: "12px", letterSpacing: "0.05em",
+                background: "none", border: "none", cursor: "pointer",
+                color: activeTab === tab.id ? "#6EE7B7" : "#475569",
+                borderBottom: activeTab === tab.id ? "2px solid #6EE7B7" : "2px solid transparent",
+                marginBottom: "-1px", transition: "all 0.15s",
+              }}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {/* DECISION TREE TAB */}
+        {activeTab === "decision" && (
+          <div>
+            <p style={{ fontSize: "13px", color: "#64748B", marginTop: 0, marginBottom: "24px", lineHeight: "1.6" }}>
+              Answer these questions about your use case. Metrics will be auto-recommended based on your answers.
+            </p>
+            <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+              {DECISION_QUESTIONS.map((q, i) => (
+                <div key={q.id} style={{
+                  background: "#0F172A",
+                  border: `1px solid ${answers[q.id] !== undefined ? "#1E3A5F" : "#1E293B"}`,
+                  borderRadius: "10px", padding: "18px 22px",
+                  display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px",
+                }}>
+                  <div style={{ flex: 1 }}>
+                    <span style={{ fontSize: "11px", color: "#334155", marginRight: "10px" }}>
+                      {String(i + 1).padStart(2, "0")}
+                    </span>
+                    <span style={{ fontSize: "14px", color: "#CBD5E1" }}>{q.question}</span>
+                    {answers[q.id] !== undefined && (
+                      <div style={{ marginTop: "6px", fontSize: "11px", color: "#38BDF8" }}>
+                        → {answers[q.id] ? (q.yes.length > 0 ? `Adds: ${q.yes.join(", ")}` : "No new metrics") : "Skipped"}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
+                    {[true, false].map((val) => (
+                      <button
+                        key={String(val)}
+                        onClick={() => setAnswers((prev) => ({ ...prev, [q.id]: val }))}
+                        style={{
+                          padding: "7px 18px", fontSize: "12px", borderRadius: "6px",
+                          cursor: "pointer", fontFamily: "inherit",
+                          border: answers[q.id] === val
+                            ? `1px solid ${val ? "#6EE7B7" : "#F87171"}`
+                            : "1px solid #1E293B",
+                          background: answers[q.id] === val
+                            ? val ? "#064E3B" : "#450A0A"
+                            : "#0A0A0F",
+                          color: answers[q.id] === val
+                            ? val ? "#6EE7B7" : "#F87171"
+                            : "#475569",
+                          transition: "all 0.15s",
+                        }}
+                      >
+                        {val ? "Yes" : "No"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={{ marginTop: "28px", textAlign: "right" }}>
+              <button
+                onClick={() => setActiveTab("manual")}
+                style={{
+                  padding: "12px 28px", background: "linear-gradient(135deg, #064E3B, #1E3A5F)",
+                  border: "1px solid #6EE7B7", borderRadius: "8px",
+                  color: "#6EE7B7", fontSize: "13px", fontFamily: "inherit",
+                  cursor: "pointer", letterSpacing: "0.05em",
+                }}
+              >
+                Next: Manual Tuning →
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* MANUAL TUNING TAB */}
+        {activeTab === "manual" && (
+          <div>
+            <p style={{ fontSize: "13px", color: "#64748B", marginTop: 0, marginBottom: "24px", lineHeight: "1.6" }}>
+              Add or remove any metrics. Recommended metrics are highlighted. Toggle any to include/exclude.
+            </p>
+            {Object.entries(METRIC_LIBRARY).map(([cat, metrics]) => {
+              const meta = CATEGORY_META[cat];
+              return (
+                <div key={cat} style={{ marginBottom: "28px" }}>
+                  <div style={{
+                    display: "flex", alignItems: "center", gap: "10px", marginBottom: "12px"
+                  }}>
+                    <span style={{ fontSize: "16px", color: meta.color }}>{meta.icon}</span>
+                    <span style={{
+                      fontSize: "11px", letterSpacing: "0.15em",
+                      color: meta.color, textTransform: "uppercase"
+                    }}>{meta.label}</span>
+                    <div style={{ flex: 1, height: "1px", background: "#1E293B" }} />
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+                    {metrics.map((m) => {
+                      const selected = isSelected(m.id);
+                      const recommended = recommendedIds.has(m.id);
+                      return (
+                        <div
+                          key={m.id}
+                          onClick={() => toggle(m.id)}
+                          style={{
+                            padding: "12px 14px", borderRadius: "8px", cursor: "pointer",
+                            border: selected
+                              ? `1px solid ${meta.color}44`
+                              : "1px solid #1E293B",
+                            background: selected ? `${meta.bg}` : "#0A0A0F",
+                            transition: "all 0.15s",
+                            position: "relative",
+                          }}
+                        >
+                          {recommended && (
+                            <span style={{
+                              position: "absolute", top: "8px", right: "10px",
+                              fontSize: "9px", color: meta.color,
+                              letterSpacing: "0.1em",
+                            }}>REC</span>
+                          )}
+                          <div style={{
+                            fontSize: "13px", color: selected ? "#F1F5F9" : "#475569",
+                            marginBottom: "4px", paddingRight: "32px", lineHeight: "1.3",
+                          }}>{m.name}</div>
+                          <div style={{ fontSize: "11px", color: selected ? "#64748B" : "#334155" }}>
+                            {m.description}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+            <div style={{ marginTop: "28px", textAlign: "right" }}>
+              <button
+                onClick={() => setActiveTab("results")}
+                style={{
+                  padding: "12px 28px", background: "linear-gradient(135deg, #064E3B, #1E3A5F)",
+                  border: "1px solid #6EE7B7", borderRadius: "8px",
+                  color: "#6EE7B7", fontSize: "13px", fontFamily: "inherit",
+                  cursor: "pointer", letterSpacing: "0.05em",
+                }}
+              >
+                View Results ({finalMetrics.length} metrics) →
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* RESULTS TAB */}
+        {activeTab === "results" && (
+          <div>
+            <p style={{ fontSize: "13px", color: "#64748B", marginTop: 0, marginBottom: "24px", lineHeight: "1.6" }}>
+              Score each metric on <strong style={{ color: "#CBD5E1" }}>Impact</strong> and <strong style={{ color: "#CBD5E1" }}>Effort</strong> to auto-assign tiers.
+            </p>
+
+            {finalMetrics.length === 0 ? (
+              <div style={{
+                textAlign: "center", padding: "60px", color: "#334155",
+                border: "1px dashed #1E293B", borderRadius: "12px",
+              }}>
+                No metrics selected yet. Complete the Decision Tree first.
+              </div>
+            ) : (
+              <>
+                {/* Matrix header */}
+                <div style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 120px 120px 100px",
+                  gap: "8px", padding: "8px 14px",
+                  fontSize: "10px", letterSpacing: "0.15em", color: "#334155",
+                }}>
+                  <div>METRIC</div>
+                  <div>IMPACT IF WRONG</div>
+                  <div>EASE TO MEASURE</div>
+                  <div>TIER</div>
+                </div>
+
+                {finalMetrics.map((m) => {
+                  const meta = CATEGORY_META[m.category] || { color: "#94A3B8", bg: "#1E293B", icon: "◉" };
+                  const tierColor =
+                    m.tier === "core" ? "#6EE7B7"
+                      : m.tier === "diagnostic" ? "#FDE68A"
+                        : "#94A3B8";
+                  return (
+                    <div key={m.id} style={{
+                      display: "grid",
+                      gridTemplateColumns: "1fr 120px 120px 100px",
+                      gap: "8px", alignItems: "center",
+                      padding: "12px 14px", marginBottom: "6px",
+                      background: "#0F172A", borderRadius: "8px",
+                      border: "1px solid #1E293B",
+                    }}>
+                      <div>
+                        <span style={{ fontSize: "12px", color: meta.color, marginRight: "8px" }}>{meta.icon}</span>
+                        <span style={{ fontSize: "13px", color: "#CBD5E1" }}>{m.name}</span>
+                      </div>
+                      <select
+                        value={impactScores[m.id] || "High"}
+                        onChange={(e) => setImpactScores((prev) => ({ ...prev, [m.id]: e.target.value }))}
+                        style={{
+                          background: "#0A0A0F", border: "1px solid #1E293B",
+                          color: "#94A3B8", fontSize: "12px", padding: "5px 8px",
+                          borderRadius: "5px", fontFamily: "inherit", cursor: "pointer",
+                        }}
+                      >
+                        {IMPACT_OPTIONS.map((o) => <option key={o}>{o}</option>)}
+                      </select>
+                      <select
+                        value={effortScores[m.id] || "Easy"}
+                        onChange={(e) => setEffortScores((prev) => ({ ...prev, [m.id]: e.target.value }))}
+                        style={{
+                          background: "#0A0A0F", border: "1px solid #1E293B",
+                          color: "#94A3B8", fontSize: "12px", padding: "5px 8px",
+                          borderRadius: "5px", fontFamily: "inherit", cursor: "pointer",
+                        }}
+                      >
+                        {EFFORT_OPTIONS.map((o) => <option key={o}>{o}</option>)}
+                      </select>
+                      <div style={{
+                        fontSize: "10px", letterSpacing: "0.12em",
+                        color: tierColor, textTransform: "uppercase",
+                        padding: "4px 8px", borderRadius: "4px",
+                        border: `1px solid ${tierColor}33`,
+                        background: `${tierColor}11`,
+                        textAlign: "center",
+                      }}>
+                        {m.tier}
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {/* Summary */}
+                <div style={{
+                  marginTop: "32px",
+                  display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "16px"
+                }}>
+                  {[
+                    { label: "Core", sublabel: "Always run · block on failure", metrics: coreMets, color: "#6EE7B7", bg: "#064E3B" },
+                    { label: "Diagnostic", sublabel: "Run when core metrics degrade", metrics: diagMets, color: "#FDE68A", bg: "#78350F" },
+                    { label: "Exploratory", sublabel: "Periodic or on new releases", metrics: exploMets, color: "#94A3B8", bg: "#1E293B" },
+                  ].map((tier) => (
+                    <div key={tier.label} style={{
+                      background: "#0F172A", border: `1px solid ${tier.color}33`,
+                      borderRadius: "10px", padding: "18px",
+                    }}>
+                      <div style={{ fontSize: "11px", letterSpacing: "0.15em", color: tier.color, marginBottom: "4px" }}>
+                        {tier.label.toUpperCase()}
+                      </div>
+                      <div style={{ fontSize: "11px", color: "#475569", marginBottom: "14px" }}>
+                        {tier.sublabel}
+                      </div>
+                      <div style={{
+                        fontSize: "32px", fontWeight: 700, color: tier.color, marginBottom: "12px"
+                      }}>
+                        {tier.metrics.length}
+                      </div>
+                      {tier.metrics.map((m) => (
+                        <div key={m.id} style={{
+                          fontSize: "12px", color: "#64748B",
+                          padding: "4px 0", borderBottom: "1px solid #1E293B",
+                        }}>
+                          {m.name}
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ marginTop: "28px", display: "flex", gap: "12px", justifyContent: "flex-end" }}>
+                  <button
+                    onClick={saveUseCase}
+                    disabled={!useCaseName.trim()}
+                    style={{
+                      padding: "12px 28px",
+                      background: useCaseName.trim() ? "linear-gradient(135deg, #064E3B, #1E3A5F)" : "#0F172A",
+                      border: `1px solid ${useCaseName.trim() ? "#6EE7B7" : "#1E293B"}`,
+                      borderRadius: "8px",
+                      color: useCaseName.trim() ? "#6EE7B7" : "#334155",
+                      fontSize: "13px", fontFamily: "inherit",
+                      cursor: useCaseName.trim() ? "pointer" : "not-allowed",
+                      letterSpacing: "0.05em",
+                    }}
+                  >
+                    Save Use Case
+                  </button>
+                  <button
+                    onClick={() => {
+                      setAnswers({});
+                      setManualSelections({});
+                      setImpactScores({});
+                      setEffortScores({});
+                      setUseCaseName("");
+                      setActiveTab("decision");
+                    }}
+                    style={{
+                      padding: "12px 28px", background: "#0F172A",
+                      border: "1px solid #334155", borderRadius: "8px",
+                      color: "#475569", fontSize: "13px", fontFamily: "inherit",
+                      cursor: "pointer", letterSpacing: "0.05em",
+                    }}
+                  >
+                    New Use Case
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* SAVED TAB */}
+        {activeTab === "saved" && (
+          <div>
+            {savedUseCases.length === 0 ? (
+              <div style={{ textAlign: "center", padding: "60px", color: "#334155" }}>
+                No saved use cases yet.
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+                {savedUseCases.map((uc) => (
+                  <div key={uc.name} style={{
+                    background: "#0F172A", border: "1px solid #1E293B",
+                    borderRadius: "10px", padding: "20px 24px",
+                  }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div>
+                        <div style={{ fontSize: "15px", color: "#E2E8F0", marginBottom: "4px" }}>{uc.name}</div>
+                        <div style={{ fontSize: "11px", color: "#334155" }}>{uc.timestamp} · {uc.metrics.length} metrics</div>
+                      </div>
+                      <div style={{ display: "flex", gap: "24px" }}>
+                        {["core", "diagnostic", "exploratory"].map((tier) => {
+                          const count = uc.metrics.filter((m) => m.tier === tier).length;
+                          const color = tier === "core" ? "#6EE7B7" : tier === "diagnostic" ? "#FDE68A" : "#94A3B8";
+                          return (
+                            <div key={tier} style={{ textAlign: "center" }}>
+                              <div style={{ fontSize: "20px", color, fontWeight: 700 }}>{count}</div>
+                              <div style={{ fontSize: "10px", color: "#475569", letterSpacing: "0.1em" }}>
+                                {tier.toUpperCase()}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div style={{ marginTop: "14px", display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                      {uc.metrics.map((m) => {
+                        const color = m.tier === "core" ? "#6EE7B7" : m.tier === "diagnostic" ? "#FDE68A" : "#94A3B8";
+                        return (
+                          <span key={m.id} style={{
+                            fontSize: "11px", padding: "3px 10px",
+                            borderRadius: "20px", border: `1px solid ${color}33`,
+                            color, background: `${color}11`,
+                          }}>{m.name}</span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
